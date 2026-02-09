@@ -1,25 +1,28 @@
 \chapter{Introduction}
 \label{c:intro}
 
-Named Data Networking (NDN) replaces host-centric addressing with a data-centric paradigm in which named content is retrieved through \emph{Interest}/\emph{Data} exchanges and can be served from in-network caches. While this model simplifies content delivery and improves robustness, it leaves a critical operational gap for \textbf{producer mobility}: when a producer changes its point of attachment (PoA), the network must rapidly steer Interests to the new location and return Data along valid reverse paths. In latency-sensitive applications (e.g., live video streaming and real-time conferencing), even short interruptions translate into visible stalls and user-perceived failure. Empirically, baseline deployments that rely on link-state reconvergence (e.g., NLSR) often show second-level interruptions after handoff, indicating that routing-only recovery is too slow for micro-mobility scenarios.
+Named Data Networking (NDN) replaces host-centric addressing with a data-centric paradigm in which named content is retrieved through \emph{Interest}/\emph{Data} exchanges and can be served from in-network caches. While this model simplifies content delivery and improves robustness, it leaves a critical operational gap for \textbf{producer mobility}: when a producer changes its point of attachment (PoA), the network must wait for routing updates, then route Interests to the new location, and return Data along valid reverse paths. In latency-sensitive applications (e.g., live video streaming and real-time meeting), even short interruptions lead to visible stalls and a reduction in user experience. According to experiments, baseline deployments of native NDN that rely on link-state reconvergence (e.g., NLSR) show obvious interruptions after handoff, indicating that routing-only recovery is too slow for latency-sensitive scenarios. In this case, a specific solution is necessary to improve the performance of the NDN producer mobility.
 
 \section{Problem and Motivation}
 \label{sec:intro:problem}
 
-We focus on producer mobility in realistic access/aggregation/core topologies where a mobile producer reattaches within a limited radius (micro-mobility). The goal is to maintain \emph{continuous} service across handoffs with: (i) minimal \textbf{service disruption time}; (ii) a low \textbf{unmet-Interest ratio}—i.e., Interests satisfied without retransmission; and (iii) bounded \textbf{overhead} on both control and data planes. The receiver-driven nature of NDN, combined with non-instantaneous routing convergence, creates a transient mismatch: Interests continue to follow stale FIB entries toward the old location, while Data generated around the handoff may arrive at nodes lacking valid PIT state for reverse forwarding. Naïve flooding can reduce disruption but risks an excessive blast radius and instability. What is practically needed is a \emph{fast, yet safe} , bridging mechanism that restores bidirectional reachability immediately after movement, with explicit bounds on scope and duration, and without invasive changes to global routing.
+We focus on producer mobility in a realistic classic layered network structure where mobile producers usually reattach within a limited radius. The goal is to maintain \emph{continuous} service across handoffs with: (i) minimal \textbf{service disruption time}; (ii) a low \textbf{unmet-Interest ratio}—i.e., Interests satisfied without retransmission; and (iii) reasonalbe \textbf{overhead} on both control and data planes.
+
+The receiver-driven nature of NDN, combined with the routing convergence time, creates a transient mismatch. Immediately after a handoff, Interests still follows stale FIB entries toward the old PoA, while Data produced at the new PoA traverse nodes that do not have corresponding PIT state for reverse forwarding. What is practically needed is a \emph{fast, yet safe} , bridging mechanism that restores bidirectional reachability immediately after movement. Also, with explicit bounds on scope and duration, without invasive changes to native routing mechanism.
 
 \section{Our Approach: OptoFlood (Controllable Flooding)}
 \label{sec:intro:approach}
 
-We propose \textbf{OptoFlood}, a \emph{unified controllable flooding} mechanism that transiently reconnects consumers and a relocated producer while global routing catches up. OptoFlood is built around three design principles:
+We propose \textbf{OptoFlood}, a \emph{controllable flooding} mechanism that transiently reconnects consumers and a relocated producer while global routing catches up. OptoFlood is implemented as a forwarding-plane recovery loop coupled with short-lived locality assistance. Concretely, it consists of three tightly integrated components: (i) \emph{Data flooding} guided by FIB with deduplication and scope control; (ii) \emph{Interest flooding} triggered only when forwarding fails (no usable next hop or \texttt{NO\_ROUTE}); and (iii) \emph{success-driven transient state} (TFIB) that both guides forwarding and can trigger a short-lived Fast-LSA route to accelerate nearby convergence.
 
 \begin{itemize}
-  \item \textbf{Immediate reachability.} Upon mobility, OptoFlood aims to provide working paths for both pending and new Interests \emph{immediately}, so applications resume without waiting for full routing propagation.
-  \item \textbf{Scoped, rate-limited propagation.} Flooding is \emph{explicitly bounded}—e.g., by per-hop \texttt{HopLimit} in the LP header, short lifetimes/TTLs, and per-producer rate limits—so its effects remain local and predictable.
-  \item \textbf{Convergence assistance from success signals.} Successfully delivered Data and transient forwarding state (TFIB) provide \emph{local hints} that accelerate nearby reconvergence (e.g., fast, short-lived advertisements akin to Fast-LSA), complementing rather than replacing NLSR.
+  \item \textbf{Immediate reachability.} Upon mobility, OptoFlood aims to provide available paths for both pending and new Interests \emph{immediately}, so applications resume without waiting for routing convegency.
+  \item \textbf{Scoped, rate-limited propagation.} Flooding is \emph{explicitly bounded} by hop/time/rate guards. In the current implementation, Interest flooding uses the native \texttt{HopLimit} (default 3, decremented per hop). Data flooding is also controlled: forwarders prefer FIB-guided forwarding and fall back to a conservative one-hop blind flood only when no FIB next hop exists.
+  \item \textbf{Convergence assistance from flooding.} Successfully flooded Data populates a transient forwarding information base (TFIB) (short idle lifetime with sliding refresh). When TFIB is updated, the forwarder can automatically trigger a local Fast-LSA management command with throttling and deduplication. This will instal a short-lived FIB hint to speed up nearby reconvergence without changing global routing semantics.
 \end{itemize}
 
-Concretely, OptoFlood extends the forwarding plane with mobility-aware markings (e.g. a \emph{MobilityFlag}) and a per-hop \texttt{HopLimit} for recovery traffic. Forwarders interpret these signals to (i) relay recovery Interests/Data across the small set of paths most likely to reach the new PoA; (ii) suppress escalation via conservative scope control; and (iii) harvest success to provide lightweight, short-lived locality information that improves subsequent lookups until normal routing takes over. This unified view avoids splitting the mechanism into separate “stages”: OptoFlood operates as a single cohesive recovery loop with consistent safety guards.
+\noindent\textbf{Mobility markings and flooding triggers.}
+The producer marks mobility Data by writing \texttt{FloodId} and \texttt{NewFaceSeq} in the Data MetaInfo. Forwarders treat such Data as recovery traffic, apply FloodId-based deduplication and rate limiting, and update TFIB. Interest flooding is triggered inside the forwarder when normal forwarding cannot proceed (no usable next hop or a \texttt{NO\_ROUTE} NACK), and is constrained to non-local point-to-point faces with per-node (Name+Nonce) deduplication.
 
 \section{Design Constraints and Safety}
 \label{sec:intro:safety}
@@ -27,31 +30,34 @@ Concretely, OptoFlood extends the forwarding plane with mobility-aware markings 
 OptoFlood is engineered to be deployable on existing NDN stacks and robust under load:
 
 \begin{enumerate}
-  \item \textbf{Scope bounding.} A conservative \texttt{HopLimit} (tuned to typical access/aggregation diameters) and short TTLs prevent long-range spread; rate limiting is enforced per producer/prefix to avoid bursts.
-  \item \textbf{State discipline.} Transient forwarding state (TFIB) is minimal, local, and promptly garbage-collected; it increases the chance that recovery traffic follows valid reverse paths without growing unbounded tables.
-  \item \textbf{Non-intrusive to routing.} OptoFlood requires no anchors and no topology-wide changes; optional Fast-LSA style signals are local and ephemeral, accelerating nearby convergence while leaving NLSR semantics intact.
+  \item \textbf{Scope bounding.} Interest flooding uses a conservative native \texttt{HopLimit} (default 3, hop-by-hop decremented). Data flooding is even more conservative: forwarders prefer FIB-guided forwarding, and only when no FIB next hop exists do they perform a one-hop blind flooding.
+  \item \textbf{Governing discipline.} TFIB is local, minimal, and promptly trashed. It has a short idle lifetime with sliding refresh and retirement once stable FIB becomes available, to prevent unbounded state growth while increasing the chance that recovery traffic follows valid reverse paths.
+  \item \textbf{Non-intrusive to routing.} OptoFlood requires no anchors and no protocol changes. Fast-LSA is implemented as a local and short-lived management action with throttling and deduplication; failures are non-fatal (logged only), and the system falls back to normal NLSR convergence.
   \item \textbf{Compatibility.} The mechanism is compatible with standard Interest retransmission behaviour and cache hits; it does not assume global time synchronisation or special hardware.
 \end{enumerate}
 
 \section{Evaluation Overview and Metrics}
 \label{sec:intro:eval}
 
-We develop a Makefile-driven Mini-NDN workflow that reproducibly instantiates identical topologies, traffic, and mobility traces across two paired runs: a \emph{baseline} (no OptoFlood) and a \emph{solution} (OptoFlood enabled). Packet captures at the consumer and at the old/new PoAs allow us to compute:
+We develop a Makefile-driven Mini-NDN workflow that reproducibly instantiates identical topologies, traffic, and mobility traces across two paired runs: a \emph{baseline} (no OptoFlood) and a \emph{solution} (OptoFlood enabled). Our testbed includes a canonical access/aggregation-style topology (a chain with a branch) and multiple producer moves, with packet captures and control-plane snapshots.
+
+It allows us to compute:
 \begin{itemize}
   \item \textbf{Service disruption time}: elapsed time from reattachment to the first successful Data after handoff;
-  \item \textbf{Unmet-Interest ratio}: fraction of Interests in a fixed window around the handoff that are satisfied \emph{without} retransmission;
-  \item \textbf{Flooding overhead}: recovery traffic per second and observed hop span, verifying that \texttt{HopLimit} and rate limits cap the blast radius.
+  \item \textbf{Unmet-Interest ratio}: fraction of Interests in a window around the handoff that are satisfied \emph{without} retransmission;
+  \item \textbf{Flooding overhead}: recovery traffic per second and observed hop span, verifying that \texttt{HopLimit} and conservative forwarding rules cap the blast radius.
 \end{itemize}
-This methodology isolates mobility effects and produces paired comparisons under identical conditions. We report medians and tail statistics across handoffs to reflect user-perceived worst-case behaviour.
+
+This methodology isolates mobility effects and produces paired comparisons under identical conditions.
 
 \section{Contributions}
 \label{sec:intro:contrib}
 
 This thesis makes the following contributions.
 \begin{enumerate}
-  \item \textbf{OptoFlood}: a unified, controllable flooding mechanism that restores post-handoff connectivity immediately and safely, without anchors or invasive routing changes.
-  \item \textbf{Safety kit for flooding}: a concrete set of scope/time/rate guards (\texttt{HopLimit}, TTLs, per-producer rate limits) and transient state management (TFIB) that keep recovery effective yet predictable.
-  \item \textbf{Local convergence assistance}: success-driven, short-lived locality signals (Fast-LSA concept) that accelerate nearby reconvergence during the transient.
+  \item \textbf{OptoFlood}: a unified controllable flooding mechanism that restores post-handoff connectivity immediately and safely, without anchors or invasive routing changes.
+  \item \textbf{A deployable safety kit for flooding}: concrete, implementation-backed bounds on scope and cost, including (i) Interest flooding triggered only under forwarding failure and bounded by native \texttt{HopLimit}, (ii) conservative Data flooding (FIB-guided first, one-hop blind flood only when necessary), and (iii) rate limiting and FloodId-based deduplication.
+  \item \textbf{Success-driven transient state and local convergence assistance}: TFIB as a short-lived locality hint and an optional Fast-LSA mechanism triggered by forwarders with throttling/deduplication, accelerating nearby reconvergence while preserving NLSR semantics.
   \item \textbf{Reproducible evaluation and mobility-centric metrics}: a Makefile-controlled workflow and three metrics—service interruption time, unmet-Interest ratio, flooding overhead—that jointly capture continuity, reliability, and safety.
 \end{enumerate}
 
@@ -60,30 +66,30 @@ This thesis makes the following contributions.
 
 The remainder of this dissertation is organised as follows.
 \begin{itemize}
-  \item \textbf{Chapter~\ref{c:bg}} revisits the fundamentals of NDN, the forwarding state, and the mobility of producers, and reviews the related work in ICN/IP.
-  \item \textbf{Chapter~\ref{c:design}} presents the OptoFlood design, including packet markings, forwarding logic, and safety mechanisms.
-  \item \textbf{Chapter~\ref{c:impl}} details the implementation in Mini-NDN/NFD and the measurement instrumentation.
-  \item \textbf{Chapter~\ref{c:eval}} evaluates OptoFlood under micro-mobility workloads, reporting continuity, reliability, and overhead.
-  \item \textbf{Chapter~\ref{c:discussion}} discusses trade-offs, security considerations, and deployment guidance.
-  \item \textbf{Chapter~\ref{c:conclusion}} concludes and outlines future directions.
+  \item \textbf{Chapter~\ref{c:bg}} introduces the NDN architecture, the forwarding state, and the baseline routing and mobility behaviour, and reviews related work in ICN/IP.
+  \item \textbf{Chapter~\ref{c:problem}} formalises the producer mobility problem studied in this thesis, clarifies assumptions, and defines the evaluation goals and metrics used throughout.
+  \item \textbf{Chapter~\ref{c:optoflood}} presents the design of OptoFlood, including the mobility markings, the forwarding logic for controllable flooding, and the safety mechanisms that limit the scope and cost.
+  \item \textbf{Chapter~\ref{c:routingacc}} discusses routing acceleration as a further step beyond baseline recovery, focusing on how success-driven locality information can be used to assist faster nearby reconvergence and the associated trade-offs.
+  \item \textbf{Chapter~\ref{c:video}} evaluates OptoFlood using real video delivery, examining user-perceived continuity (e.g., stalls and recovery) and end-to-end performance under producer handoffs.
+  \item \textbf{Chapter~\ref{c:conclusion}} concludes the thesis, summarises key findings, and outlines future work.
 \end{itemize}
 
 %==============================================================================
 \section{Thesis Statement}
 \label{c:intro:thesisstatement}
 
-\textbf{Hypothesis.} In NDN producer mobility, a \emph{unified controllable flooding} mechanism that (i) provides immediate reachability for both pending and new Interests, (ii) bounds propagation by hop/time/rate guards, and (iii) leverages success-driven transient state to assist local reconvergence, can reduce service disruption time and unmet-Interest ratio to application-acceptable levels while keeping flooding overhead predictably low in micro-mobility domains.
+\textbf{Hypothesis.} In NDN producer mobility, a \emph{unified controllable flooding} mechanism that (i) provides immediate reachability for both pending and new Interests, (ii) bounds propagation by hop/time/rate guards, and (iii) leverages flooding-driven transient state (TFIB) with optional short-lived Fast-LSA locality hints, can reduce service disruption time and unmet-Interest ratio to application-acceptable levels while keeping flooding overhead predictably low.
 
 \textbf{Research Questions.}
 \begin{enumerate}
   \item \textbf{RQ1 (Continuity).} To what extent can controllable flooding shorten the service disruption time after producer handoff compared to routing-only recovery?
   \item \textbf{RQ2 (Reliability).} How much can it reduce the unmet-Interest ratio for requests around the handoff without relying on excessive retransmissions?
   \item \textbf{RQ3 (Safety/Cost).} Under conservative hop/time/rate bounds, what is the resulting flooding overhead and observed hop span, and are these stable across topology variations typical of access/aggregation networks?
-  \item \textbf{RQ4 (Convergence Assistance).} Do success-driven, short-lived locality signals (e.g., TFIB/Fast-LSA style hints) measurably accelerate nearby reconvergence without modifying global routing semantics?
+  \item \textbf{RQ4 (Convergence Assistance).} Do flooding-driven, short-lived locality signals (TFIB and Fast-LSA hints) measurably accelerate nearby reconvergence without modifying global routing semantics?
 \end{enumerate}
 
-\textbf{Method.} We implement OptoFlood in a reproducible Mini-NDN workflow and conduct paired experiments (\emph{baseline} vs.\ \emph{solution}) under identical topologies and mobility traces. We measure (i) service disruption time, (ii) unmet-Interest ratio, and (iii) flooding overhead/scope from packet captures at the consumer and old/new PoAs, reporting medians and tail behaviour over multiple handoffs.
+\textbf{Method.} We implement OptoFlood in a reproducible Mini-NDN workflow and conduct paired experiments (\emph{baseline} vs.\ \emph{solution}) under identical topologies and mobility traces. We measure (i) service disruption time, (ii) unmet-Interest ratio, and (iii) flooding overhead/scope from packet captures at the consumer and old/new PoAs.
 
-\textbf{Claim.} Our evaluation demonstrates that controllable flooding provides immediate recovery with bounded cost in micro-mobility settings, offering a practical path to deployable producer mobility in NDN without anchors or invasive routing changes.
+\textbf{Claim.} Our evaluation demonstrates that controllable flooding provides immediate recovery with bounded cost, offering a practical path to deployable producer mobility in NDN without anchors or invasive routing changes.
 
 \input{"10-introduction/thesis_statement.tex"}

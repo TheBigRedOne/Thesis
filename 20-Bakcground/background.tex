@@ -1,15 +1,106 @@
-\section{Thesis Statement}
-NDN faces significant challenges in producer mobility scenarios. When a producer moves, existing mechanisms inevitably require a series of steps: the producer must re-register its data prefix, the Named-data Link State Routing (NLSR) protocol must propagate global routing updates, routers update forwarding entries, and consumers retransmit their Interests to re-establish connectivity. This sequence introduces considerable latency and packet loss, undermining user experience and reliability, particularly for latency-sensitive or real-time applications.
+\chapter{Background}
+\label{c:bg}
 
-\textbf{I assert that these mobility challenges can be effectively addressed through directed, scoped, flood-based approaches.} 
-Flooding refers to selectively broadcasting interest or \DataPackets\ to multiple neighbouring nodes simultaneously, thereby rapidly establishing temporary communication paths without relying on slow NLSR route convergence. By enabling immediate local discovery of relocated producers, flooding can significantly reduce latency and packet loss during handoffs, effectively bridging the communication gap until stable global routing updates are complete.
+This chapter revisits the fundamentals of Named Data Networking (NDN), with an emphasis on the forwarding plane state that underpins NDN's data delivery semantics and, at the same time, shapes its mobility behaviour.
+We then summarise the baseline routing and producer mobility behaviour in our evaluation environment and finally review related work in ICN and IP mobility.
 
-To demonstrate this claim, my solutions tackle the mobility problem through three incremental stages, each addressing specific limitations of NDN's existing mobility handling mechanisms:
+\section{NDN architecture}
+\label{sec:bg:ndn-arch}
 
-\begin{itemize}
-    \item \textbf{Stage I Data Flooding for Pending Interests:} Immediately after relocation, the producer floods the \DataPackets\ to proactively satisfy outstanding interests issued before its move, thereby avoiding data loss caused by outdated forwarding entries.
-    \item \textbf{Stage II Interest Flooding for Temporary Channel Establishment:} To handle new interests arriving during the slow convergence period, controlled interest flooding is introduced. This mechanism rapidly discovers the producer's new location and establishes temporary bidirectional communication paths, ensuring continuous data flow despite ongoing routing updates.
-    \item \textbf{Stage III Localised Flooding with Prefix Indexing:} Recognising the scalability limits of flooding, this final stage incorporates localised flood boundaries and lightweight prefix indexing techniques. By guiding interest and \DataPackets\ only towards the most relevant regions, this approach significantly reduces network overhead, enabling the flooding-based solution to scale efficiently to larger and more dynamic network environments.
-\end{itemize}
+NDN is an information-centric network architecture that names \emph{data} rather than \emph{hosts} and retrieves content by name through a request--response exchange.
+A consumer issues an \emph{Interest} for a name, and the network returns a matching \emph{Data} packet that carries both the content and a signature, enabling data-centric security and caching in the network \cite{jacobson:2009:named-content,zhang:2014:ndn}.
+Forwarding decisions are made based on name prefixes rather than IP addresses, and routers may satisfy cache Interests, reducing load on producers, and improving performance \cite{zhang:2014:ndn,xylomenos:2014:icn-survey}.
 
-Through comprehensive analysis and experiment evaluation, I will quantitatively measure improvements in key performance metrics such as handoff latency, packet loss rates, and network overhead. The results will validate that strategically controlled flooding can offer effective and efficient producer mobility support in diverse NDN deployment scenarios.
+In a typical NDN deployment, consumers and producers attach to edge routers, while the network core forwards Interests towards the best-known name prefix routes.
+Although the architecture is agnostic to the routing protocol, many experimental deployments use a link-state approach where name prefixes are advertised and shortest paths are computed, analogous to IP link-state routing, but operating on name reachability rather than address reachability \cite{hoque:2013:nlsr}.
+
+\section{Forwarding plane and state}
+\label{sec:bg:fwd-state}
+
+A distinguishing property of NDN is \emph{stateful forwarding}.
+Routers maintain the forwarding state for outstanding Interests, which enables reverse-path Data delivery without requiring end-host addresses \cite{yi:2013:stateful-forwarding}.
+In terms of concreteness, NDN forwarding is based on three major tables.
+
+\subsection{Content Store (CS)}
+The CS is an in-network cache.
+When an Interest arrives, the router may return cached Data immediately if a matching Data is found, without forwarding the Interest further.
+CS behaviour is typically policy-driven (e.g., LRU-like replacement) and affects both performance and traffic locality.
+
+\subsection{Pending Interest Table (PIT)}
+The PIT tracks Interests that have been forwarded upstream but not yet satisfied.
+Each PIT entry records the name (and selectors) along with the set of downstream faces that expressed the Interest.
+When the corresponding Data return, the router forwards it to all recorded downstream faces and removes (or updates) the PIT entry.
+The PIT also enables Interest aggregation: if multiple downstream consumers request the same name while an upstream request is pending, the router can suppress duplicate upstream forwarding and simply add downstream faces to the PIT entry.
+
+\subsection{Forwarding Information Base (FIB)}
+The FIB maps name prefixes to next hops.
+Upon an Interest miss in CS and PIT, the router performs a longest-prefix match over the name to select outgoing faces, following the configured forwarding strategy.
+In contrast to IP, where reverse-path delivery is derived from the source address and routing table symmetry, NDN leverages PIT state to ensure Data flows back to requesting consumers.
+
+Stateful forwarding provides both benefits and challenges.
+On the one hand, the PIT state supports multipath retrieval, multicast-like delivery to multiple consumers, and robustness to certain link failures \cite{yi:2013:stateful-forwarding}.
+On the other hand, the PIT state introduces new failure and attack surfaces (e.g., Interest flooding) and couples data delivery to the temporal correctness of the forwarding state \cite{afanasyev:2013:interest-flooding}.
+This coupling is central to producer mobility: when a producer changes its attachment point, the network's FIB and routing state may temporarily point to an obsolete location, and Interests can be forwarded along invalid paths until routing converges.
+
+\section{Baseline routing and producer mobility behaviour}
+\label{sec:bg:baseline}
+
+\subsection{Baseline routing with NLSR}
+In our evaluation environment, the name-based routing of the baseline is provided by the Named-data Link State Routing protocol (NLSR) \cite{hoque:2013:nlsr}.
+Routers form adjacencies with neighbours, disseminate link-state information, and compute routes for name prefixes.
+A producer advertises the name prefix it serves, and the computed routes are installed into the local RIB/FIB so that Interests for that prefix are forwarded along the shortest path.
+
+This baseline resembles IP link-state routing in spirit, but differs in two important ways.
+First, reachability is expressed over \emph{name prefixes} rather than addresses.
+Second, forwarding correctness for a particular name depends not only on FIB convergence, but also on PIT dynamics and the forwarding strategy's handling of failures (e.g., when no usable next hop exists).
+
+\subsection{Producer mobility under baseline routing}
+Producer mobility in NDN can be broadly classified into \emph{micro-mobility} (movement within a routing domain or access region) and \emph{macro-mobility} (movement across domains).
+This thesis focuses on micro-mobility, where attachment changes are frequent and the recovery target is sub-second continuity.
+
+In baseline routing, producer mobility triggers a control-plane and data-plane mismatch period.
+After a producer moves, previously valid FIB entries may still forward Interests towards the old attachment point.
+Unless alternative paths or cached content exist, these Interests will time out or be NACKed, and the consumer must retransmit.
+Service continuity is therefore bounded by: (i) the routing protocol's detection of topology/prefix changes, (ii) propagation and processing delays of routing updates, and (iii) the consumer's retransmission behaviour.
+The net effect is that, without dedicated mobility support, producer mobility can manifest as a visible service interruption even in small topologies.
+
+In our testbed workflow (Mini-NDN with NFD and NLSR), routing and forwarding logs, PCAP trace and FIB snapshots are collected around mobility events to characterise baseline behaviour and provide a reference point for OptoFlood’s improvements :contentReference[oaicite:0]{index = 0}.
+This instrumentation allows us to attribute interruptions to forwarding failures (e.g., lack of a usable next hop) versus delayed routing convergence.
+
+\section{Related work}
+\label{sec:bg:rw}
+
+We review previous work from two perspectives: (i) mobility support and forwarding resilience in ICN/NDN, and (ii) host-centric mobility in IP networks.
+
+\subsection{ICN/NDN surveys and mobility problem space}
+The ICN has been extensively surveyed, including discussions of naming, routing, forwarding, caching, and security trade-offs \cite{trossen:2012:icn-internet,xylomenos:2014:icn-survey,feng:2016:survey}.
+Within this landscape, mobility is repeatedly identified as a practical challenge: while receiver mobility is often naturally handled by re-expressing Interests from the new location, \emph{producer mobility} is harder because the network must discover and re-establish reachability to the producer’s current attachment point \cite{tyson:2012:mobility-survey,zhang:2016:mobility-survey}.
+
+\subsection{Producer mobility mechanisms in NDN}
+A family of NDN mobility mechanisms attempts to provide fast producer reachability updates.
+KITE proposes a rendezvous-based approach in which the producer updates a tracker, and consumers retrieve content by first reaching that stable rendezvous and then being redirected or guided \cite{zhang:2018:kite}.
+MAP-Me targets fast micro-mobility by propagating updates in the data plane, enabling routers to adjust forwarding state more quickly than pure control-plane convergence \cite{auge:2016:map-me,auge:2018:map-me}.
+More broadly, recent systematic reviews categorise ICN mobility solutions by their anchoring strategy, update dissemination, and reliance on routing versus forwarding-plane mechanisms \cite{abrar:2023:systematic}.
+
+These works inform the design space explored in this thesis: whether to rely on (or accelerate) routing convergence or to introduce limited-scope forwarding mechanisms that bridge the mismatch period.
+
+\subsection{Forwarding robustness and flooding control}
+Flooding and controlled broadcast have been considered both as a resilience technique and as a risk factor in NDN.
+Interest flooding has been studied as an attack and as a stressor in stateful forwarding, motivating rate limiting, suppression, and careful forwarding strategy design \cite{afanasyev:2013:interest-flooding}.
+For mobility, limited-scope dissemination can serve as a rapid, local recovery mechanism, provided that the scope is bounded and duplicates are suppressed, a theme that directly motivates the controllable mechanisms developed later in this thesis.
+
+\subsection{Mobility in IP networks}
+In IP, mobility is traditionally addressed by separating identity from location and providing a mechanism to route packets to a moving node.
+Mobile IPv6 (MIPv6) introduces a home agent and care-of addresses to maintain reachability as the node changes networks \cite{johnson:2004:mipv6}.
+Proxy Mobile IPv6 (PMIPv6) transforms mobility management into the network, reducing the changes required at the mobile node \cite{gundavelli:2008:pmipv6}.
+Although these approaches are mature, they operate in an address-centric paradigm and generally provide host reachability rather than name-based data retrieval.
+
+The comparison of IP and NDN highlights a key difference: NDN’s data retrieval and caching on the network change the semantics of “reachability,” but producer mobility still demands timely updates of the forwarding state.
+This parallel motivates the thesis approach of using a fast bounded recovery mechanism to complement (rather than replace) baseline routing.
+
+\section{Summary}
+\label{sec:bg:summary}
+
+This chapter established the architectural and stateful-forwarding foundations of NDN, described why producer mobility stresses baseline routing-based reachability, and positioned our work within prior ICN/IP mobility research.
+The next chapter formalises the producer mobility problem addressed in this thesis and defines the target operating conditions and evaluation criteria.
+

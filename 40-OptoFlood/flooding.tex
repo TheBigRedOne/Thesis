@@ -1,0 +1,197 @@
+\chapter{OptoFlood}
+\label{c:optoflood}
+
+This chapter presents the design of \emph{OptoFlood}, a data-plane mechanism that restores producer reachability under micro-mobility by building a short-lived bidirectional path using controllable flooding.
+OptoFlood is designed to (i) recover forwarding quickly without waiting for global routing convergence, (ii) bound the scope and cost of flooding, and (iii) remain compatible with baseline NDN forwarding behaviour when the OptoFlood markings are absent.
+
+\section{Design Goals and Assumptions}
+\label{sec:optoflood:goals}
+
+OptoFlood targets \emph{micro-mobility}: a producer changes its point of attachment within a domain where the routing system is eventually consistent but may converge slowly (e.g., link-state updates with periodic control timers).
+The design is driven by three goals:
+
+\begin{itemize}
+  \item \textbf{Continuity:} re-establish Interest--Data exchange quickly after a producer handover, avoiding long stalls caused by stale FIB state.
+  \item \textbf{Controllability:} limit the flooding radius, suppress duplicates, and rate-limit the additional traffic.
+  \item \textbf{Incrementality:} use only local, temporary state; when the baseline routing converges, OptoFlood should retire itself and revert to normal unicast forwarding.
+\end{itemize}
+
+We assume a hop-by-hop forwarding plane with PIT/CS/FIB as in NDN, and a routing plane (e.g., NLSR) that will eventually publish stable routes to the producer prefix. OptoFlood does not require synchronised clocks or topology knowledge at forwarders.
+
+\section{Overview}
+\label{sec:optoflood:overview}
+
+At a high level, OptoFlood operates in two complementary directions:
+
+\begin{enumerate}
+  \item \textbf{Mobility-marked Data:} when a producer attaches to a new access router, it emits Data packets carrying a mobility marking. Forwarders treat such Data as a signal to \emph{opportunistically} reach consumers even if the FIB is temporarily incorrect. During this process, forwarders also populate a \emph{Temporary FIB (TFIB)} that points back towards the new producer attachment.
+  \item \textbf{Triggered Interest flooding:} when a forwarder cannot make progress with normal forwarding (no usable next hop or a \texttt{NO\_ROUTE} NACK), it locally switches to bounded flooding for that Interest, allowing it to discover the TFIB-assisted reverse path.
+\end{enumerate}
+
+These two directions form a short-lived bidirectional path: mobility-marked Data helps ``teach'' the network the new direction (TFIB), and bounded Interest flooding helps consumers reach that temporary state. The system is explicitly designed to be self-limiting: once stable FIB routes exist, forwarding follows them, and temporary state expires.
+
+\section{Packet Markings}
+\label{sec:optoflood:markings}
+
+OptoFlood uses lightweight per-packet markings to identify mobility-related traffic and control flooding.
+
+\subsection{Flood Identifier and New-Face Sequence}
+\label{sec:optoflood:markings:floodid}
+
+A producer annotates mobility-related Data with:
+\begin{itemize}
+  \item \textbf{FloodId:} an identifier for the deduplication of flooded Data.
+  \item \textbf{NewFaceSeq:} a monotonically increasing sequence that reflects successive attachment events (or, more generally, an ordering token for the latest producer location).
+\end{itemize}
+
+Forwarders use FloodId to suppress duplicates and NewFaceSeq to prefer a fresher temporary state when multiple updates compete.
+
+\subsection{Hop Limit for Bounded Flooding}
+\label{sec:optoflood:markings:hoplimit}
+
+OptoFlood bounds flooding using hop limits:
+\begin{itemize}
+  \item \textbf{Interest HopLimit:} OptoFlood uses the native Interest HopLimit field; if an Interest is flooded, the forwarder ensures a default hop limit is present and decrements it hop-by-hop.
+  \item \textbf{Data OptoHopLimit:} for mobility-marked Data that must be forwarded without a usable FIB next hop, OptoFlood uses an experimental link-protocol hop limit field (denoted \texttt{OptoHopLimit}) to bound the blind flooding radius.
+\end{itemize}
+
+Importantly, OptoFlood does \emph{not} flood arbitrarily: hop limits are small constants chosen to confine the additional traffic to the vicinity of the handover.
+
+\section{Temporary Forwarding State}
+\label{sec:optoflood:state}
+
+\subsection{Temporary FIB (TFIB)}
+\label{sec:optoflood:state:tfib}
+
+OptoFlood introduces a \emph{Temporary FIB (TFIB)} at forwarders. A TFIB entry records (conceptually) a mapping from a name prefix to a next hop face that is believed to lead towards the producer's \emph{new} attachment.
+TFIB is \emph{a soft state}: entries expire after a short idle timeout and are refreshed on use.
+
+We deliberately keep TFIB semantics minimal:
+\begin{itemize}
+  \item TFIB is populated only from \emph{point-to-point} ingress faces to avoid amplifying traffic from multi-access links.
+  \item Entries use a short lifetime (seconds) with \emph{a sliding refresh} on hits.
+  \item The TFIB is retired once the stable FIB is considered usable, ensuring that OptoFlood does not permanently override the routing plane.
+\end{itemize}
+
+\subsection{Deduplication and Rate Control Caches}
+\label{sec:optoflood:state:caches}
+
+To bound overhead, OptoFlood maintains small in-memory caches:
+\begin{itemize}
+  \item \textbf{FloodId cache} for Data deduplication (drop repeats of already forwarded mobility-marked Data).
+  \item \textbf{Interest flooding cache} keyed by (Name, Nonce) with a short TTL to ensure each forwarder floods a given Interest at most once.
+  \item \textbf{Flood rate map} to rate-limit mobility-marked Data forwarding bursts.
+\end{itemize}
+
+\section{Forwarding Logic}
+\label{sec:optoflood:forwarding}
+
+This section describes OptoFlood forwarding behaviour in a forwarder, organised by packet type.
+
+\subsection{Mobility-Marked Data Handling}
+\label{sec:optoflood:forwarding:data}
+
+When a forwarder receives a Data packet that carries the OptoFlood mobility marking, it applies the following steps:
+
+\paragraph{Step 1: normal delivery takes priority.}
+If the Data satisfies pending PIT entries, it is delivered as usual.
+This also defines a natural ``stop'' for flooding: once the packet reaches the on-path PIT state, further propagation becomes unnecessary.
+
+\paragraph{Step 2: guided forwarding when FIB is usable.}
+If the forwarder has a usable FIB next hop for the Data name prefix, it forwards the Data along that next hop (unicast-guided behaviour) rather than flooding.
+This ensures that OptoFlood does not increase traffic when the routing plane is already correct.
+
+\paragraph{Step 3: one-hop blind flooding when FIB is unusable.}
+If there is no usable FIB in the next hop, the forwarder performs blind flooding in one hop using \texttt{OptoHopLimit} = 1 (decremented in each hop).
+Flooding is restricted to point-to-point faces and excludes:
+(i) the ingress face and
+(ii) faces already satisfied by PIT forwarding decisions.
+This rule limits the cost and limits the probability of broadcast storms.
+
+\paragraph{Step 4: TFIB update.}
+On receiving mobility-marked Data on a point-to-point ingress, the forwarder updates TFIB for the corresponding prefix, remembering that the ingress direction may lead to the producer.
+TFIB is refreshed on use and expires quickly when idle.
+
+\paragraph{Step 5: deduplication and rate limiting.}
+Before forwarding mobility-marked Data, the forwarder checks the FloodId cache and drops duplicates.
+It also applies a per-prefix or per-flow rate limit to cap the forwarding cost under bursty traffic.
+
+\subsection{Interest Forwarding with TFIB Assistance}
+\label{sec:optoflood:forwarding:interest-tfib}
+
+For Interests, OptoFlood adds a TFIB-assisted path selection step \emph{before} falling back to flooding:
+
+\begin{enumerate}
+  \item If TFIB has a matching entry for the Interest name prefix, forward the Interest to the TFIB face.
+  \item If TFIB points back to the ingress face (a potential loop symptom) and the Interest does not carry a hop limit, the forwarder may generate a new Nonce copy and proceed with flooding (Section~\ref{sec:optoflood:forwarding:interest-flood}) to escape the loop.
+  \item Otherwise, proceed with baseline strategy (e.g., FIB-based forwarding) if possible.
+\end{enumerate}
+
+This design makes TFIB the bridge between the data-driven ``learning'' signal (mobility-marked Data) and consumer-driven reachability (Interests).
+
+\subsection{Triggered Interest Flooding}
+\label{sec:optoflood:forwarding:interest-flood}
+
+OptoFlood floods an Interest \emph{only when normal forwarding cannot make progress}.
+Two trigger conditions are used:
+
+\begin{itemize}
+  \item \textbf{No usable next hop:} the forwarder cannot select an outgoing face under the baseline strategy.
+  \item \textbf{\texttt{NO\_ROUTE} NACK:} the forwarder receives a downstream NACK indicating no route.
+\end{itemize}
+
+When triggered, the forwarder performs bounded flooding:
+\begin{itemize}
+  \item Ensure that the Interest has a HopLimit (default is a small constant); decrement HopLimit hop-by-hop and stop at zero.
+  \item Flood only to point-to-point faces and never to \texttt{LOCAL} faces.
+  \item Use an (Name, Nonce) cache to ensure that each forwarder floods a given Interest at most once within a short window.
+  \item Refresh the Nonce when initiating flooding to reduce false loop suppression while still allowing downstream NACKs to propagate back for application-level retransmissions.
+\end{itemize}
+
+If an incoming Interest already carries a HopLimit (i.e., it is already in the flooding mode), the forwarder continues the bounded flooding procedure, respecting HopLimit decrement and cache suppression.
+
+\section{Safety Mechanisms}
+\label{sec:optoflood:safety}
+
+OptoFlood limits both \emph{scope} and \emph{cost} of flooding through several layers of safeguards:
+
+\subsection{Scope Limitation}
+\label{sec:optoflood:safety:scope}
+
+\begin{itemize}
+  \item \textbf{Hop limits:} Interest flooding is bounded by native HopLimit; Data blind flooding uses \texttt{OptoHopLimit} and is one-hop by default.
+  \item \textbf{Face restriction:} forwarding during flooding is limited to point-to-point faces and excludes \texttt{LOCAL} faces.
+  \item \textbf{Suppressed faces:} the forwarder avoids sending a flooded packet back to the ingress face or to faces already satisfied by PIT decisions.
+\end{itemize}
+
+\subsection{Cost Control}
+\label{sec:optoflood:safety:cost}
+
+\begin{itemize}
+  \item \textbf{Data deduplication:} FloodId cache prevents repeated propagation of the same mobility-marked Data.
+  \item \textbf{Interest deduplication:} (Name, Nonce) cache ensures that an Interest is flooded at most once per forwarder in a short interval.
+  \item \textbf{Rate limiting:} mobility-marked Data forwarding is rate-limited to cap the additional traffic.
+\end{itemize}
+
+\subsection{Soft-State Expiry and Retirement}
+\label{sec:optoflood:safety:expiry}
+
+TFIB entries expire quickly when idle and are refreshed only on actual use.
+This makes OptoFlood naturally resilient to stale state and ensures that, after routing converges, baseline FIB forwarding dominates, and TFIB disappears.
+
+\section{Interoperability and Deployment Notes}
+\label{sec:optoflood:interop}
+
+OptoFlood is designed to be incrementally deployable within a domain.
+Nodes that do not understand OptoFlood markings will simply treat packets as ordinary Interest/Data and will not populate TFIB nor trigger flooding.
+Within an OptoFlood-enabled region, bounded flooding remains local due to hop limits and face restrictions.
+
+In practice, OptoFlood's parameters (default hop limits, cache TTLs, TFIB lifetime, and rate limits) are chosen conservatively to provide continuity benefits under micro-mobility while keeping overhead bounded.
+We discuss parameter sensitivity and deployment guidance in Chapter~\ref{c:discussion}.
+
+\section{Summary}
+\label{sec:optoflood:summary}
+
+OptoFlood augments NDN forwarding with (i) mobility markings on Data, (ii) a short-lived TFIB learnt from mobility-marked traffic, and (iii) bounded, trigger-based Interest flooding as a fallback when normal forwarding fails.
+The resulting mechanism establishes a temporary bidirectional path after handover while keeping flooding local and self-limiting.
+The next chapter builds on this foundation by describing how OptoFlood interacts with routing acceleration mechanisms and control-plane integration.
