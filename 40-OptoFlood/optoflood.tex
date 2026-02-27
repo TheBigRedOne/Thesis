@@ -28,7 +28,7 @@ At a high level, OptoFlood operates in two complementary directions:
   \item \textbf{Triggered Interest flooding:} when a forwarder cannot make progress with normal forwarding (no usable next hop or a \texttt{NO\_ROUTE} NACK), it locally switches to bounded flooding for that Interest, allowing it to discover the TFIB-assisted reverse path.
 \end{enumerate}
 
-These two directions form a short-lived bidirectional path: mobility-marked Data helps ``teach'' the network the new direction (TFIB), and bounded Interest flooding helps consumers reach that temporary state. The system is explicitly designed to be self-limiting: once stable FIB routes exist, forwarding follows them, and temporary state expires.
+These two directions form a short-lived bidirectional path: mobility-marked Data helps ``teach'' the network the new direction (TFIB), and bounded Interest flooding helps consumers reach that temporary state. The system is explicitly designed to be self-limiting: once stable FIB routes exist, forwarding follows them, and the temporary state expires.
 
 \section{Packet Markings}
 \label{sec:optoflood:markings}
