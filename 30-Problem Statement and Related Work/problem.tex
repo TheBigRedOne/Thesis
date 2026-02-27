@@ -1,7 +1,7 @@
 \chapter{Problem}
 \label{c:problem}
 
-This chapter formalises the producer mobility problem studied in this thesis. We first define the network and mobility model, then state the baseline behaviour that causes long service disruption under producer movement. Finally, we specify the evaluation goals and the metrics used throughout the remainder of the dissertation.
+This chapter formalises the producer mobility problem studied in this thesis. We first define the network and mobility model and then state the baseline behaviour that causes long service disruption under producer movement. Finally, we specify the evaluation goals and metrics used throughout the remainder of the dissertation.
 
 \section{System model}
 \label{sec:problem:model}
@@ -12,7 +12,7 @@ We consider an NDN network consisting of a set of routers interconnected by poin
 A \emph{producer} serves a name prefix (e.g., a live stream prefix) and may move between attachment points (edge routers). A \emph{mobility event} occurs when the producer detaches from one access router and reattaches to another, potentially changing the forwarding path from consumers to the producer.
 
 \textbf{Micro-mobility scope.}
-The primary scope of this thesis is \emph{intra-domain} producer mobility (micro-mobility), where the producer remains within the same administrative domain and the naming scheme stays stable. Consumers are assumed to keep requesting the same name prefix across mobility events.
+The primary scope of this thesis is \emph{intra-domain} producer mobility (micro-mobility), where the producer remains within the same administrative domain and the naming scheme stays stable. Consumers are assumed to continue to request the same name prefix across mobility events.
 
 \textbf{Traffic pattern.}
 We focus on continuous delivery workloads (e.g., live streaming or repetitive chunk retrieval) where consumers generate Interests at a steady pace and the producer responds with a steady stream of Data. This traffic pattern stresses continuity: even short disruptions can lead to visible degradation at the application layer.
@@ -22,7 +22,7 @@ We focus on continuous delivery workloads (e.g., live streaming or repetitive ch
 
 Producer mobility is challenging in NDN because forwarding correctness depends on a consistent mapping between name prefixes and next hops. When the producer changes attachment point, the FIB entries that previously guided Interests towards the old location can become stale. During the interval before the control plane converges to the new best path, Interests may be forwarded toward the old attachment point and fail, resulting in missing Data and repeated retransmissions.
 
-In a link-state control plane, convergence requires (i) neighbour/adjacency change detection, (ii) dissemination of updated routing advertisements, and (iii) recomputation and installation of new routes. These steps are periodic and timer-driven in practice, so convergence can be substantially slower than the underlying data plane forwarding timescale. Consequently, \emph{service disruption after producer movement is dominated by routing convergence delay rather than by packet transmission delay}.
+In a link-state control plane, convergence requires (i) neighbour / adjacency change detection, (ii) dissemination of updated routing advertisements, and (iii) recomputation and installation of new routes. These steps are periodic and timer-driven in practice, so convergence can be substantially slower than the underlying data plane forwarding timescale. Consequently, \emph{service disruption after producer movement is dominated by a routing convergence delay rather than a packet transmission delay}.
 
 \section{Problem statement}
 \label{sec:problem:statement}
@@ -39,8 +39,15 @@ This problem has three coupled aspects:
 \begin{enumerate}
   \item \textbf{Continuity}: minimise the disruption perceived by applications (outage time, loss, and instability).
   \item \textbf{Efficiency}: limit additional traffic and state induced by any fast-recovery mechanism.
-  \item \textbf{Safety}: ensure the recovery mechanism cannot be trivially abused to cause persistent flooding, routing corruption, or unbounded state growth.
+  \item \textbf{Safety}: ensure that the recovery mechanism cannot be trivially abused to cause persistent flooding, routing corruption, or unbounded state growth.
 \end{enumerate}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/NDN_Producer_Mobility_Problem.pdf}
+    \caption{NDN Producer Mobility Problem}
+    \label{fig:NDN_Producer_Mobility_Problem}
+\end{figure}
 
 \section{Assumptions and design constraints}
 \label{sec:problem:assumptions}
@@ -48,9 +55,9 @@ This problem has three coupled aspects:
 The evaluation and the mechanisms discussed later in this thesis adopt the following constraints, grounded in the behaviour of our prototype system:
 
 \begin{itemize}
-  \item \textbf{Point-to-point forwarding scope.} Flooding-based recovery, if used, is restricted to point-to-point faces and excludes local/control faces, to avoid accidental amplification through local-only channels. :contentReference[oaicite:0]{index=0}
+  \item \textbf{Point-to-point forwarding scope.} Flooding-based recovery, if used, is restricted to point-to-point faces and excludes local/control faces, to avoid accidental amplification through local-only channels. :contentReference[oaicite:0]{index = 0}
   \item \textbf{Bounded flooding radius.} Any opportunistic broadcast-like forwarding must be constrained by hop limits. In our prototype, Interest flooding uses the native HopLimit field with a small default (e.g., 3) and decrements per hop. 
-  \item \textbf{Temporary forwarding state.} Fast recovery may rely on short-lived forwarding hints/state (e.g., a temporary FIB) that expires quickly (seconds-scale) and is refreshed only when used, preventing indefinite persistence. Our prototype uses a temporary FIB (TFIB) with an idle expiry on the order of 5 \,s and a sliding refresh on use. 
+  \item \textbf{Temporary forwarding state.} Fast recovery may rely on short-lived forwarding hints/state (e.g., a temporary FIB) that expires quickly (second-scale) and is refreshed only when used, preventing indefinite persistence. Our prototype uses a temporary FIB (TFIB) with an idle expiry on the order of 5 \,s and a sliding refresh on use. 
   \item \textbf{Trigger conditions.} Recovery actions should be invoked only when the normal forwarding path is absent or clearly failing. In our prototype, Interest flooding is triggered when there is no usable next hop or upon receiving a \texttt{NO\_ROUTE} NACK, and then suppressed by short-term per-node de-duplication. 
 \end{itemize}
 
