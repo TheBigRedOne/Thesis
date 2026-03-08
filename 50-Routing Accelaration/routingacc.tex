@@ -1,3 +1,125 @@
 \chapter{Routing Acceleration}
 \label{c:routingacc}
 
+This chapter extends OptoFlood beyond baseline forwarding-plane recovery to the
+control-plane question. Once forwarding has \emph{already} re-established reachability after a handoff, how to help the routing system reconverge \emph{faster} in the vicinity of the move, without changing the global routing semantics.
+
+The key idea is to treat successful post-handoff delivery as a \emph{locality signal}. After a producer reconnects, OptoFlood’s mobility-marked traffic and the resulting transient forwarding state (TFIB) indicate which direction is currently effective. Rather than waiting for normal link-state timers and full dissemination, we use this success-driven locality information to trigger a short-lived routing hint for nearby routers. In our prototype, this is realised as a forwarder-triggered \emph{Fast-LSA} management action in NLSR, installing a temporary RIB/FIB entry with explicit throttling and expiry.
+
+\section{Motivation: Beyond Forwarding-plane Recovery}
+\label{sec:routingacc:motivation}
+
+OptoFlood (Chapter~\ref{c:optoflood}) is designed to bridge the transient mismatch period immediately after a handoff, when Interests still follow stale FIB entries toward the old attachment point and Data generated at the new attachment point may not find matching PIT state on the reverse path. The controllable flooding loop restores bidirectional reachability at the forwarding timescale (RTT-scale), and the mechanism self-limits via hop bounds, de-duplication, rate control, and short-lived soft state.
+
+However, forwarding-plane recovery does not eliminate the underlying cause: the routing plane is still stale until the baseline control plane finishes reconvergence. During this interval, recovered delivery may remain \emph{fragile}: packets can take suboptimal paths, recovery may require repeated local flooding triggers, and different routers may have inconsistent next-hop preferences. Practically, if routing can be nudged to “catch up” in the local neighbourhood of the movement, OptoFlood can (i) retire its temporary behaviours earlier, (ii) reduce the frequency and extent of triggered flooding, and (iii) improve stability under repeated micro-mobility events.
+
+\section{Design Overview}
+\label{sec:routingacc:overview}
+
+The acceleration of routing in this thesis follows three principles.
+
+\begin{enumerate}
+  \item \textbf{Success-driven signalling.} The control plane is assisted only by information that arises from successful forwarding events (e.g., TFIB insertions refreshed by actual traffic), rather than speculative topology inference.
+  \item \textbf{Locality and bounded lifetime.} Any routing hint is short-lived and intended to influence only the nearby reconvergence window; it must expire quickly and be safe to ignore.
+  \item \textbf{Non-intrusive semantics.} The baseline routing protocol (NLSR) remains the authority for stable reachability; acceleration provides optional hints and degrades gracefully when unavailable.
+\end{enumerate}
+
+In the prototype, the acceleration loop can be summarised as follows:
+
+\begin{quote}
+Mobility-marked Data $\rightarrow$ TFIB update (local success signal) $\rightarrow$ trigger a short-lived Fast-LSA $\rightarrow$ temporary RIB/FIB hint in nearby routers $\rightarrow$ faster nearby reconvergence.
+\end{quote}
+
+This is implemented as a management command endpoint in NLSR, invoked by the forwarder
+when TFIB is updated, with built-in throttling and de-duplication.
+
+\section{Success-driven Locality Information}
+\label{sec:routingacc:locality}
+
+The transient forwarding state introduced by OptoFlood (TFIB) is populated from observed traffic and therefore encodes a “direction that worked recently” for a given prefix. TFIB is a soft state (idle expiry with sliding refresh) and is deliberately minimal: it stores only the next-hop face and freshness ordering information (e.g., NewFaceSeq) for a prefix, allowing a router to bias forwarding toward the newly effective direction without permanently overriding the stable FIB.
+
+From the perspective of routing acceleration, TFIB provides two useful signals:
+
+\begin{itemize}
+  \item \textbf{Where.} The ingress face that delivered mobility-marked Data suggests the direction toward the producer’s new attachment, within the local neighbourhood.
+  \item \textbf{When.} The TFIB refresh and ordering token (NewFaceSeq) allow the forwarder to prefer more recent attachments and suppress outdated hints.
+\end{itemize}
+
+Importantly, these signals are \emph{success-driven}: they exist only if the data plane has already observed traffic consistent with the new attachment. This reduces the risk of pushing incorrect routing information compared to purely timer-driven or topology-speculative optimisations.
+
+\section{Fast-LSA Mechanism}
+\label{sec:routingacc:fastlsa}
+
+\subsection{Trigger and Invocation}
+\label{sec:routingacc:fastlsa-trigger}
+
+In the current implementation, the forwarder triggers a Fast-LSA management action when a TFIB entry is inserted or updated. The trigger is rate-limited (500\,ms per prefix) and deduplicated (by prefix and NewFaceSeq) to avoid excessive control traffic under bursty mobility-marked delivery. If the management command fails (e.g., NLSR not running), the failure is logged, and forwarding-plane recovery proceeds unchanged.
+
+\subsection{FastPrefix LSA and Temporary Route Installation}
+\label{sec:routingacc:fastlsa-install}
+
+NLSR exposes a control command endpoint \texttt{/localhost/nlsr/fast-lsa/trigger}, which publishes a short-lived prefix announcement (FastPrefixLsa) and installs a corresponding temporary route. The announcement carries the target name prefix and an explicit \texttt{ExpirationPeriod} (approximately 1\,s by default in the prototype). Optionally, the command can include a \texttt{FaceId} and \texttt{Cost} (e.g., NewFaceSeq-derived), enabling NLSR to register a temporary RIB entry with a controlled lifetime.
+
+This design intentionally keeps Fast-LSA semantically weak: it is a bounded-time hint rather than a replacement for link-state convergence. Once expired, routers return to the routes computed from normal LSAs (Name LSA and Adj LSA), and OptoFlood’s TFIB also naturally decays when stable FIB becomes usable.
+
+\subsection{Scope and Propagation}
+\label{sec:routingacc:fastlsa-scope}
+
+Fast-LSA is intended to accelerate the \emph{nearby} reconvergence. In practice, locality is enforced by the short lifetime of the hint and by control-plane throttling; additional scope control (e.g., explicit K-hop dissemination limits) is a natural extension discussed later as a consideration of trade-off and deployment.
+
+\section{Interaction with OptoFlood}
+\label{sec:routingacc:interaction}
+
+OptoFlood and routing acceleration form a layered recovery path:
+
+\begin{itemize}
+  \item \textbf{OptoFlood ensures continuity first.} Controllable flooding restores delivery immediately at a bounded cost (Chapter~\ref{c:optoflood}).
+  \item \textbf{TFIB bridges data plane and control plane.} TFIB records the success-driven direction and simultaneously improves forwarding decisions for Interests.
+  \item \textbf{Fast-LSA helps the control plane catch up locally.} Temporary route hints reduce the time during which routers rely on stale next hops and reduce repeated flooding triggers.
+  \item \textbf{Graceful retirement.} Once the baseline routing converges, stable FIB forwarding dominates, and both TFIB and Fast-LSA disappear automatically (soft-state decay).
+\end{itemize}
+
+The implementation aligns with this intention: Fast-LSA is optional and non-fatal; forwarding behaviour remains correct (within OptoFlood’s safety limits) even if the routing acceleration path is disabled or fails.
+
+\section{Trade-offs and Safety Considerations}
+\label{sec:routingacc:tradeoffs}
+
+Routing acceleration introduces explicit trade-offs that must be managed.
+
+\paragraph{Control overhead vs.\ faster reconvergence.}
+Triggering Fast-LSA too frequently can increase control traffic and churn, while triggering it too conservatively reduces its benefit. The prototype uses throttling and de-duplication to cap this overhead.
+
+\paragraph{Local hints vs.\ global correctness.}
+Fast-LSA must not “fight" with the stable routing protocol. Short expiration and non-intrusive origin tagging ensure that hints are temporary and do not permanently override normal LSAs.
+
+\paragraph{Freshness ordering and conflicting moves.}
+With repeated handoffs, multiple locality hints may compete. Ordering tokens (NewFaceSeq) and per-prefix de-duplication reduce the chance of reinstating obsolete temporary routes.
+
+\paragraph{Partial deployment.}
+Acceleration relies on NLSR support for the management endpoint. When not supported, the system degrades to forwarding-plane recovery only (OptoFlood), preserving correctness.
+
+\section{Evaluation Plan}
+\label{sec:routingacc:evalplan}
+
+The evaluation in this chapter focuses on whether success-driven locality hints measurably accelerate nearby reconvergence and reduce the dependency on repeated flooding triggers.
+
+We will compare three configurations under identical mobility traces:
+
+\begin{enumerate}
+  \item \textbf{Baseline:} NLSR routing only.
+  \item \textbf{OptoFlood:} forwarding-plane recovery without routing acceleration.
+  \item \textbf{OptoFlood+Acceleration:} OptoFlood with TFIB-triggered Fast-LSA.
+\end{enumerate}
+
+We will report:
+
+\begin{itemize}
+  \item \textbf{Nearby convergence time:} time from handoff to stable next-hop installation for the producer prefix on routers within a few hops.
+  \item \textbf{Continuity stability:} disruption time and unmet-Interest ratio under repeated handoffs, emphasising variance and tail behaviour.
+  \item \textbf{Control-plane overhead:} number of Fast-LSA triggers/announcements and the cumulative duration of temporary routes installed.
+\end{itemize}
+
+\section{Summary}
+\label{sec:routingacc:summary}
+
+This chapter positions routing acceleration as an optional bounded enhancement in addition to OptoFlood’s forwarding-plane recovery. By treating forwarding success as a locality signal, and translating TFIB updates into short-lived Fast-LSA hints, the system helps nearby routers reconverge faster while preserving baseline routing semantics and maintaining a fail-safe fallback behaviour.
