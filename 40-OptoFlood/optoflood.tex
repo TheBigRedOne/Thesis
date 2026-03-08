@@ -4,10 +4,13 @@
 This chapter presents the design of \emph{OptoFlood}, a data-plane mechanism that restores producer reachability under micro-mobility by building a short-lived bidirectional path using controllable flooding.
 OptoFlood is designed to (i) recover forwarding quickly without waiting for global routing convergence, (ii) bound the scope and cost of flooding, and (iii) remain compatible with baseline NDN forwarding behaviour when the OptoFlood markings are absent.
 
-\section{Design Goals and Assumptions}
-\label{sec:optoflood:goals}
+%==============================================================================
+
+\section{Design}
+\label{sec:optoflood:design}
 
 OptoFlood targets \emph{micro-mobility}: a producer changes its point of attachment within a domain where the routing system is eventually consistent but may converge slowly (e.g., link-state updates with periodic control timers).
+
 The design is driven by three goals:
 
 \begin{itemize}
@@ -18,9 +21,7 @@ The design is driven by three goals:
 
 We assume a hop-by-hop forwarding plane with PIT/CS/FIB as in NDN, and a routing plane (e.g., NLSR) that will eventually publish stable routes to the producer prefix. OptoFlood does not require synchronised clocks or topology knowledge at forwarders.
 
-\section{Overview}
-\label{sec:optoflood:overview}
-
+\subsection{Overview}
 At a high level, OptoFlood operates in two complementary directions:
 
 \begin{enumerate}
@@ -28,7 +29,7 @@ At a high level, OptoFlood operates in two complementary directions:
   \item \textbf{Triggered Interest flooding:} when a forwarder cannot make progress with normal forwarding (no usable next hop or a \texttt{NO\_ROUTE} NACK), it locally switches to bounded flooding for that Interest, allowing it to discover the TFIB-assisted reverse path.
 \end{enumerate}
 
-These two directions form a short-lived bidirectional path: mobility-marked Data helps "teach" the network the new direction (TFIB), and bounded Interest flooding helps consumers reach that temporary state. The system is explicitly designed to be self-limiting: once stable FIB routes exist, forwarding follows them, and the temporary state expires.
+These two directions form a short-lived bidirectional path: mobility-marked Data helps "teach" the network the new direction, and bounded Interest flooding helps consumers reach that temporary state. The system is explicitly designed to be self-limiting: once stable FIB routes exist, forwarding follows them, and the temporary state expires.
 
 \begin{figure}
     \centering
@@ -37,13 +38,10 @@ These two directions form a short-lived bidirectional path: mobility-marked Data
     \label{fig:NDN_Producer_Mobility_Problem_Solution}
 \end{figure}
 
-\section{Packet Markings}
-\label{sec:optoflood:markings}
-
+\subsection{Packet Markings}
 OptoFlood uses lightweight per-packet markings to identify mobility-related traffic and control flooding.
 
-\subsection{Flood Identifier and New-Face Sequence}
-\label{sec:optoflood:markings:floodid}
+\textbf{Flood Identifier and New Face Sequence}
 
 A producer annotates mobility-related Data with:
 \begin{itemize}
@@ -53,8 +51,7 @@ A producer annotates mobility-related Data with:
 
 Forwarders use FloodId to suppress duplicates and NewFaceSeq to prefer a fresher temporary state when multiple updates compete.
 
-\subsection{Hop Limit for Bounded Flooding}
-\label{sec:optoflood:markings:hoplimit}
+\textbf{Hop Limit for Bounded Flooding}
 
 OptoFlood bounds flooding using hop limits:
 \begin{itemize}
@@ -64,12 +61,9 @@ OptoFlood bounds flooding using hop limits:
 
 Importantly, OptoFlood does \emph{not} flood arbitrarily: hop limits are small constants chosen to confine the additional traffic to the vicinity of the handover.
 
-\section{Temporary Forwarding State}
-\label{sec:optoflood:state}
+\subsection{Temporary Forwarding State}
 
-\subsection{Temporary FIB (TFIB)}
-\label{sec:optoflood:state:tfib}
-
+\textbf{Temporary FIB (TFIB)}
 OptoFlood introduces a \emph{Temporary FIB (TFIB)} at forwarders. A TFIB entry records (conceptually) a mapping from a name prefix to a next hop face that is believed to lead towards the producer's \emph{new} attachment.
 TFIB is \emph{a soft state}: entries expire after a short idle timeout and are refreshed on use.
 
@@ -80,8 +74,7 @@ We deliberately keep TFIB semantics minimal:
   \item The TFIB is retired once the stable FIB is considered usable, ensuring that OptoFlood does not permanently override the routing plane.
 \end{itemize}
 
-\subsection{Deduplication and Rate Control Caches}
-\label{sec:optoflood:state:caches}
+\textbf{Deduplication and Rate Control Caches}
 
 To bound overhead, OptoFlood maintains small in-memory caches:
 \begin{itemize}
@@ -90,13 +83,10 @@ To bound overhead, OptoFlood maintains small in-memory caches:
   \item \textbf{Flood rate map} to rate-limit mobility-marked Data forwarding bursts.
 \end{itemize}
 
-\section{Forwarding Logic}
-\label{sec:optoflood:forwarding}
-
+\subsection{Forwarding Logic}
 This section describes OptoFlood forwarding behaviour in a forwarder, organised by packet type.
 
-\subsection{Mobility-Marked Data Handling}
-\label{sec:optoflood:forwarding:data}
+\textbf{Mobility-Marked Data Handling}
 
 When a forwarder receives a Data packet that carries the OptoFlood mobility marking, it applies the following steps:
 
@@ -109,11 +99,7 @@ If the forwarder has a usable FIB next hop for the Data name prefix, it forwards
 This ensures that OptoFlood does not increase traffic when the routing plane is already correct.
 
 \paragraph{Step 3: one-hop blind flooding when FIB is unusable.}
-If there is no usable FIB in the next hop, the forwarder performs blind flooding in one hop using \texttt{OptoHopLimit} = 1 (decremented in each hop).
-Flooding is restricted to point-to-point faces and excludes:
-(i) the ingress face and
-(ii) faces already satisfied by PIT forwarding decisions.
-This rule limits the cost and limits the probability of broadcast storms.
+If there is no usable FIB in the next hop, the forwarder performs blind flooding in one hop using \texttt{OptoHopLimit} = 1 (decremented in each hop). Flooding is restricted to point-to-point faces and excludes: (i) the ingress face and (ii) faces already satisfied by PIT forwarding decisions. This rule limits the cost and limits the probability of broadcast storms.
 
 \paragraph{Step 4: TFIB update.}
 On receiving mobility-marked Data on a point-to-point ingress, the forwarder updates TFIB for the corresponding prefix, remembering that the ingress direction may lead to the producer.
@@ -123,8 +109,7 @@ TFIB is refreshed on use and expires quickly when idle.
 Before forwarding mobility-marked Data, the forwarder checks the FloodId cache and drops duplicates.
 It also applies a per-prefix or per-flow rate limit to cap the forwarding cost under bursty traffic.
 
-\subsection{Interest Forwarding with TFIB Assistance}
-\label{sec:optoflood:forwarding:interest-tfib}
+\textbf{Interest Forwarding with TFIB Assistance}
 
 For Interests, OptoFlood adds a TFIB-assisted path selection step \emph{before} falling back to flooding:
 
@@ -136,8 +121,7 @@ For Interests, OptoFlood adds a TFIB-assisted path selection step \emph{before} 
 
 This design makes TFIB the bridge between the data-driven ``learning'' signal (mobility-marked Data) and consumer-driven reachability (Interests).
 
-\subsection{Triggered Interest Flooding}
-\label{sec:optoflood:forwarding:interest-flood}
+\textbf{Triggered Interest Flooding}
 
 OptoFlood floods an Interest \emph{only when normal forwarding cannot make progress}.
 Two trigger conditions are used:
@@ -148,6 +132,7 @@ Two trigger conditions are used:
 \end{itemize}
 
 When triggered, the forwarder performs bounded flooding:
+
 \begin{itemize}
   \item Ensure that the Interest has a HopLimit (default is a small constant); decrement HopLimit hop-by-hop and stop at zero.
   \item Flood only to point-to-point faces and never to \texttt{LOCAL} faces.
@@ -164,13 +149,10 @@ If an incoming Interest already carries a HopLimit (i.e., it is already in the f
     \label{fig:Interest Flooding}
 \end{figure}
 
-\section{Safety Mechanisms}
-\label{sec:optoflood:safety}
-
+\subsection{Safety Mechanisms}
 OptoFlood limits both \emph{scope} and \emph{cost} of flooding through several layers of safeguards:
 
-\subsection{Scope Limitation}
-\label{sec:optoflood:safety:scope}
+\textbf{Scope Limitation}
 
 \begin{itemize}
   \item \textbf{Hop limits:} Interest flooding is bounded by native HopLimit; Data blind flooding uses \texttt{OptoHopLimit} and is one-hop by default.
@@ -178,8 +160,7 @@ OptoFlood limits both \emph{scope} and \emph{cost} of flooding through several l
   \item \textbf{Suppressed faces:} the forwarder avoids sending a flooded packet back to the ingress face or to faces already satisfied by PIT decisions.
 \end{itemize}
 
-\subsection{Cost Control}
-\label{sec:optoflood:safety:cost}
+\textbf{Cost Control}
 
 \begin{itemize}
   \item \textbf{Data deduplication:} FloodId cache prevents repeated propagation of the same mobility-marked Data.
@@ -187,30 +168,35 @@ OptoFlood limits both \emph{scope} and \emph{cost} of flooding through several l
   \item \textbf{Rate limiting:} mobility-marked Data forwarding is rate-limited to cap the additional traffic.
 \end{itemize}
 
-\subsection{Soft-State Expiry and Retirement}
-\label{sec:optoflood:safety:expiry}
+\textbf{Soft-State Expiry and Retirement}
 
 TFIB entries expire quickly when idle and are refreshed only on actual use.
 This makes OptoFlood naturally resilient to a stale state and ensures that after routing converges, baseline FIB forwarding dominates, and TFIB disappears.
 
-\section{Experiment}
-\label{sec:optoflood:exp}
+%==============================================================================
+
+\section{Methodology}
+\label{sec:optoflood:methodology}
+
 We evaluated OptoFlood in real-time video-based mobility scenarios, representing common live conferencing and streaming applications.
 
 We focus on campus micro-mobility with real-time video: a smartphone user walks across a campus network, with the connection handing over between nearby Points of Attachment (PoAs) under the same distribution domain while the video stream remains active. This is a common, real-world scenario that must work effectively with NDN and is sensitive to latency, packet loss, and transient routing disruption.
 
-\subsubsection{Producer Application}
-We implement a typical NDN video producer with our mobility extensions.
-Generated video Data packets have a freshness period of 10 seconds, permitting caching but preventing stale data from clogging the network, and carry a payload of synthetic data matching the size and timing of video content. The packets are digitally signed to ensure integrity and security.
-Content prefixes are advertised via NLSR in the usual manner, with the extensions discussed in Section \ref{sec:bg:baseline}.
+\subsection{Interoperability and Deployment Notes}
+OptoFlood is designed to be incrementally deployable within a domain. Nodes that do not understand OptoFlood markings will simply treat packets as ordinary Interest/Data and will not populate TFIB nor trigger flooding. Within an OptoFlood-enabled region, bounded flooding remains local due to hop limits and face restrictions. In practice, OptoFlood's parameters (default hop limits, cache TTLs, TFIB lifetime, and rate limits) are chosen conservatively to provide continuity benefits under micro-mobility while keeping overhead bounded.
+
+\subsection{Applications}
+\paragraph{Producer}
+We implement a typical NDN video producer with our mobility extensions. Generated video Data packets have a freshness period of 10 seconds, permitting caching but preventing stale data from clogging the network, and carry a payload of synthetic data matching the size and timing of video content. The packets are digitally signed to ensure integrity and security. Content prefixes are advertised via NLSR in the usual manner, with the extensions discussed in Section \ref{sec:background:introdcution_to_ndn}.
 
 Upon detecting changes in its network attachment point, the producer marks the data packets associated with the mobility event to enable OptoFlood’s to control the flooding and acceleration of convergence. In our deployment, immutable identifiers used for flooding (e.g., Flood-ID and a sequence number for forwarding hints) are carried in signed Data MetaInfo extension TLVs, while hop-by-hop controls (e.g., mobility indication and scoped hop limits) are carried in the LP header and may be updated by intermediate forwarders.
 
-\subsubsection{Consumer Application}
+\paragraph{Consumer}
 The consumer issues Interests every 33~ms (30~fps) with freshness and a 6~s lifetime, validates returned Data using a trust schema, and logs basic metrics.
 
-\subsubsection{Network Topology}
-The experiment simulates a handheld UE (e.g., a smartphone) in a campus network, maintaining a real-time video meeting while handing over between nearby Points of Attachment (PoAs) under the same distribution domain. Based on a typical walking speed of approximately 1.4~m/s and a PoA spacing of 60--80~m across roads and buildings, the UE performs a handover roughly every 45--60~seconds. This micro-mobility setting keeps movements local (within two to three hops) and provides a realistic basis for evaluating OptoFlood’s low-latency recovery after producer movements.
+\subsection{Experiment}
+\paragraph{Topology}
+The experiment simulates a handheld UE (e.g., a smartphone) in a campus network, maintaining a real-time video meeting while handing over between nearby Points of Attachment (PoAs) under the same distribution domain. Based on a typical walking speed of approximately 1.5~m/s and a PoA spacing of 60--80~m across roads and buildings, the UE performs a handover roughly every 45--60~seconds. This micro-mobility setting keeps movements local (within two to three hops) and provides a realistic basis for evaluating OptoFlood’s low-latency recovery after producer movements.
 
 The network follows a classic three-layer mobile architecture representative of carrier xHaul deployments:
 \begin{itemize}
@@ -226,7 +212,7 @@ The network follows a classic three-layer mobile architecture representative of 
     \label{exp_topo}
 \end{figure}
 
-\subsubsection{Methodology}
+\paragraph{Experiment Procedure}
 
 The simulations were conducted using Mini-NDN version 0.7.0 and repeated with identical topology, applications, and mobility patterns, with and without OptoFlood enhancements, to ensure that performance differences are attributable solely to the OptoFlood mechanism \cite{lantz:2010:mininet}.
 
@@ -238,12 +224,15 @@ We record packet traces (\texttt{ndndump}) in three places: the consumer, the ac
 
 The simulation runs as containers on a single host (an AMD EPYC server with 64 cores, 128 threads, 512GB memory, running Debian 12 ``bookworm''), so the clocks are consistent; where cross-node timing is required, we compute relative times from the consumer’s point of view.
 
-\subsection{Results}
+%==============================================================================
+
+\section{Results}
+\label{sec:optoflood:results}
 
 We evaluated OptoFlood using three metrics that capture user-perceived continuity, delivery reliability, and the safety of controlled flooding.
 Metrics are computed for each hand-off, considering the window from 2~s before reattachment to 8~s after; we also report steady-state values outside this window.
 
-\textbf{Overall throughput.}
+\subsection{Overall throughput.}
 The overall throughput could provide a clear view of the state of communication between the consumer and the producer.
 
 \begin{figure}
@@ -260,7 +249,7 @@ The overall throughput could provide a clear view of the state of communication 
     \label{fig:solution_throughput_timeseries}
 \end{figure}
 
-\textbf{Service disruption time.}
+\subsection{Service disruption time.}
 We report per-handoff disruption times as a bar plot (baseline vs OptoFlood, side-by-side). We also report the median and the 90th percentile in all handoffs. This shows how quickly communication resumes after reattachment.
 
 \begin{figure}
@@ -294,7 +283,7 @@ We computed the ratio within the analysis window for each handoff and showed a p
     \label{fig:solution_loss_comparison}
 \end{figure}
 
-\textbf{Flooding overhead and scope.}
+\subsection{Flooding overhead and scope.}
 We plotted the time series of flooded packets per second during the window and gave a small table with the observed hop span (min and max \textit{HopLimit} seen). We check that the configured hop limit is respected and that the flooding stays within the configured bound.
 
 \begin{figure}
@@ -313,14 +302,9 @@ We plotted the time series of flooded packets per second during the window and g
 
 Together, these results demonstrate that mobility introduces a clear disruption under baseline NDN, while OptoFlood reduces the disruption time and unmet requests with bounded, localised flooding.
 
-\section{Interoperability and Deployment Notes}
-\label{sec:optoflood:interop}
-
-OptoFlood is designed to be incrementally deployable within a domain. Nodes that do not understand OptoFlood markings will simply treat packets as ordinary Interest/Data and will not populate TFIB nor trigger flooding. Within an OptoFlood-enabled region, bounded flooding remains local due to hop limits and face restrictions. In practice, OptoFlood's parameters (default hop limits, cache TTLs, TFIB lifetime, and rate limits) are chosen conservatively to provide continuity benefits under micro-mobility while keeping overhead bounded.
+%==============================================================================
 
 \section{Summary}
 \label{sec:optoflood:summary}
 
-OptoFlood augments NDN forwarding with (i) mobility markings on Data, (ii) a short-lived TFIB learnt from mobility-marked traffic, and (iii) bounded, trigger-based Interest flooding as a fallback when normal forwarding fails.
-The resulting mechanism establishes a temporary bidirectional path after handover while keeping flooding local and self-limiting.
-The next chapter builds on this foundation by describing how OptoFlood interacts with routing acceleration mechanisms and control-plane integration.
+OptoFlood augments NDN forwarding with (i) mobility markings on Data, (ii) a short-lived TFIB learnt from mobility-marked traffic, and (iii) bounded, trigger-based Interest flooding as a fallback when normal forwarding fails. The resulting mechanism establishes a temporary bidirectional path after handover while keeping flooding local and self-limiting. The next chapter builds on this foundation by describing how OptoFlood interacts with routing acceleration mechanisms and control-plane integration.
